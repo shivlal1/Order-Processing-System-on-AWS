@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="function">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/Serverless/src/order-processor-lambda/function.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
