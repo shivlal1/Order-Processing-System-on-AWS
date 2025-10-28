@@ -1,53 +1,209 @@
-# Order Processing Architecture Comparison
+# Flash Sale Order Processing System: From Synchronous to Serverless 
 
-## Architecture I - Synchronous Order Processing
-**Design**: Customer → API → Payment (3s) → Response  
-Each request blocks for the full payment processing time, creating a bottleneck at 0.33 orders/second maximum throughput.
+## Overview
 
-| Users | Median (ms) | 95%ile (ms) | 99%ile (ms) | Min (ms) | Max (ms) |
-|-------|-------------|-------------|-------------|----------|----------|
-| 5     | 14,873      | 15,000      | 15,000      | 3,006    | 14,873   | 
-| 20    | 30,000      | 59,000      | 59,000      | 3,006    | 59,038   | 
+This project simulates an **e-commerce flash sale** scenario to explore how system design impacts scalability and customer experience.
 
-## Architecture II - Async with SNS/SQS
-**Design**: Customer → API → SNS → SQS → ECS Workers → Payment (3s)  
-API returns immediately (<100ms), orders queue in SQS for background processing by configurable worker goroutines.
+We start with a **synchronous order processing system** (3 orders/sec) and evolve it into an **event-driven asynchronous architecture** using **AWS SNS, SQS, and ECS**, before finally migrating to a **serverless design** powered by **AWS Lambda**.
 
-### Load Test Results - 20 Users with Varying Goroutines
-| Users | Goroutines | Median (ms) | 95%ile (ms) | 99%ile (ms) | Min (ms) | Max (ms) | Avg (ms) | 
-|-------|------------|----------|-------------|-------------|-------------|----------|----------|
-| 20    | 1          | 15          | 26          | 72          | 11       | 158      | 16.93    | 
-| 20    | 5          | 15          | 25          | 71          | 11       | 176      | 16.6     | 
-| 20    | 20         | 15          | 24          | 69          | 12       | 198      | 17.06    | 
-| 20    | 100        | 14          | 27          | 77          | 11       | 152      | 16.64    |
+---
 
-### SQS Queue Performance - 20 Users Load Test
-| Goroutines | Peak Queue Depth (messages) | Time to Clear Queue|
-|------------|----------------------------|---------------------|
-| 1          | 4.52K                      | ~3.75 hours        | 
-| 5          | 3.94K                      | ~40 minutes        | 
-| 20         | 1.19K                      | ~3 minutes         | 
-| 100        | 900                        | <1 minute          | 
+## Architecture Evolution
 
-## Architecture III - Serverless with Lambda
-**Design**: Customer → API → SNS → Lambda → Payment (3s)  
-Lambda auto-scales from 0 to thousands of concurrent executions, no queue management needed.
+### Phase 1: Synchronous Processing (Baseline)
+POST /orders/sync → Verify Payment (3s delay) → Return 200 OK
+- Simulates traditional request-response processing.
+- Bottleneck: Each order verification takes 3 seconds → limited throughput.
+- Tech: Go service deployed on AWS ECS behind an ALB.
 
-### Analysis
+---
+#### Folder Structure
 
-1. **How often did cold starts occur?**  
-   First request only, then after ~5-15 minutes of inactivity. Active use kept Lambda warm.
+```
+current-system/
+├── Terraform/
+│   ├── modules/
+│   │   ├── ecr/
+│   │   ├── ecs/
+│   │   ├── logging/
+│   │   └── network/
+│   ├── main.tf
+│   ├── outputs.tf
+│   ├── provider.tf
+│   └── variables.tf
+└── src/
+    ├── Dockerfile
+    └── main.go
+```
+### Phase 2: Asynchronous Processing (SNS + SQS + ECS)
 
-2. **Is the cost advantage compelling?**  
-   Yes. Lambda: $0 for 10K orders/month. ECS: $17/month. Break-even at 1.7M requests/month.
 
-3. **Can you accept losing SQS guarantees?**  
-   Yes. SNS gives 2 retries which is sufficient. Lost: queue visibility, custom retry logic.
+    Sync:   Customer → API → Payment (3s) → Response
+    Async:  Customer → API → Queue → Response (<100ms)
+                               ↓
+                       Background Workers → Payment (3s)
 
-4. **Scale consideration:**  
-   Free until 267K orders/month. No capacity planning needed with auto-scaling.
+- Orders acknowledged instantly (202 Accepted).
+- Payment processing happens in the background.
+- Scalable via additional ECS workers (goroutines).
 
-### Recommendation
+**Tech:**
+- SNS topic: `order-processing-events`
+- SQS queue: `order-processing-queue`
+- ECS services:
+    - `order-receiver` (API service)
+    - `order-processor` (background worker)
 
-**Should your startup switch to Lambda?**  
-Yes. Cold starts (70ms on 3s process = 2.3%) are negligible and occur rarely. The cost savings ($0 vs $17/month), elimination of queue management, and automatic scaling far outweigh the minor loss of queue control. For a startup under 267K orders/month, Lambda's operational simplicity lets you focus on product instead of infrastructure.
+---
+
+#### Folder Structure
+
+```
+Async-Solution/
+├── Terraform/
+│   ├── modules/
+│   ├── main.tf
+│   ├── outputs.tf
+│   ├── provider.tf
+│   └── variables.tf
+└── src/
+    ├── order-processor/
+    │   ├── Dockerfile
+    │   └── main.go
+    └── order-receiver/
+        ├── Dockerfile
+        └── main.go
+```
+
+### Phase 3: Serverless Processing (SNS → Lambda)
+Client → /orders/async → SNS → Lambda
+
+- Eliminates queues and ECS worker management.
+- AWS Lambda automatically scales on demand.
+- Pay-per-use model with free tier coverage up to ~267K orders/month.
+
+#### Folder Structure
+
+```
+Serverless/
+├── Terraform/
+│   ├── modules/
+│   │   ├── ecr/
+│   │   ├── ecs/
+│   │   ├── lambda/
+│   │   ├── logging/
+│   │   ├── network/
+│   │   └── sns/
+│   ├── main.tf
+│   ├── outputs.tf
+│   ├── provider.tf
+│   └── variables.tf
+└── src/
+    ├── order-processor-lambda/
+    │   └── main.go
+    └── order-receiver/
+        ├── Dockerfile
+        └── main.go
+```
+---
+
+## Infrastructure Setup
+
+**Provisioned via Terraform:**
+- VPC (10.0.0.0/16)
+- 2 Public Subnets (for ALB)
+- 2 Private Subnets (for ECS tasks)
+- Application Load Balancer (ALB)
+- ECS Cluster + Services (Receiver, Processor)
+- SNS Topic + SQS Queue
+- Lambda Function (Phase 3)
+
+---
+
+## Application Endpoints
+
+| Endpoint       | Method | Description                         |
+|----------------|--------|-------------------------------------|
+| `/orders/sync` | POST   | Synchronous order with 3s payment delay |
+| `/orders/async`| POST   | Publishes order to SNS, returns immediately |
+
+---
+
+## Load Testing with Locust
+
+| Scenario     | Users | Duration | Expected Result                     |
+|-------------|-------|----------|------------------------------------|
+| Normal      | 5     | 30s      | 100% success                        |
+| Flash Sale  | 20    | 60s      | Sync: Failures, Async: 100% accepted |
+
+**Locust Config:**
+- Spawn rate: 1 (normal), 10 (flash)
+- Wait time: 100–500ms between requests
+- Target endpoint: `/orders/sync` or `/orders/async`
+
+---
+
+## CloudWatch Monitoring
+
+**Metrics observed:**
+- `ApproximateNumberOfMessagesVisible` (SQS queue depth)
+- `NumberOfMessagesDeleted` (processed count)
+- `Lambda Duration` and `Init Duration` (for cold start analysis)
+
+**Captured graphs:**
+1. Queue spike during flash sale
+2. Gradual drain post-load
+3. Lambda cold start overhead (~70ms once per idle period)
+
+---
+
+## Serverless Evaluation (Lambda Phase)
+
+- **Cold Starts:** Occur after ~5 minutes idle
+- **Avg Init Duration:** ~73ms
+- **Overhead:** ~2.4% on a 3-second task
+- Negligible for long-running (3s) tasks
+
+---
+
+## How to Run
+
+### 1. Configure AWS CLI
+```bash
+aws configure
+```
+Set your AWS Access Key, Secret Key, and Region  
+Optionally, set a session token if using temporary credentials
+
+### 2. Initialize Terraform
+```bash
+terraform init
+```
+
+### 3. Plan Terraform Deployment
+```bash
+terraform plan
+```
+Review resources that will be created
+
+### 4. Apply Terraform Deployment
+```bash
+terraform apply
+```
+Confirm apply with `yes` or use `-auto-approve`
+##  Deliverables
+
+-  Terraform Infrastructure (VPC, ALB, ECS, SNS, SQS, Lambda)
+-  Go Services (`/orders/sync`, `/orders/async`)
+-  Locust Load Tests
+-  CloudWatch Metrics (SQS Queue Depth, Lambda Logs)
+-  Performance & Cost Analysis Report
+
+---
+
+## Key Takeaways
+
+- Synchronous systems collapse under high load.
+- Event-driven design ensures resilience via decoupling.
+- Queues add reliability but require tuning.
+- Serverless simplifies everything—ideal for startups scaling fast.
