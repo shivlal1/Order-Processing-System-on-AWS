@@ -197,7 +197,6 @@ Confirm apply with `yes` or use `-auto-approve`
 -  Go Services (`/orders/sync`, `/orders/async`)
 -  Locust Load Tests
 -  CloudWatch Metrics (SQS Queue Depth, Lambda Logs)
--  Performance & Cost Analysis Report
 
 ---
 
