@@ -62,6 +62,13 @@ current-system/
 Async-Solution/
 ├── Terraform/
 │   ├── modules/
+│   │   ├── ecr/
+│   │   ├── ecs/
+│   │   ├── lambda/
+│   │   ├── logging/
+│   │   ├── network/
+│   │   └── sns/
+│   │   └── sqs/
 │   ├── main.tf
 │   ├── outputs.tf
 │   ├── provider.tf
